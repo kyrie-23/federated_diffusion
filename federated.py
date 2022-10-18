@@ -28,6 +28,7 @@ class Configs(BaseConfigs):
     dataloaders=[]
     global_model: UNet
     global_diffusion: DenoiseDiffusion
+    # Default settings
     # Number of channels in the image. $3$ for RGB.
     image_channels: int = 3
     # Image size
@@ -255,6 +256,7 @@ def main():
         'dataset': 'MNIST',  # 'MNIST','CelebA'
         'image_channels': 1,  # 1,3
         'epochs': 5,  # 5,100
+        'n_clients': 5,
     })
 
 
