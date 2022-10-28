@@ -15,6 +15,7 @@ from labml_helpers.device import DeviceConfigs
 from labml_nn.diffusion.ddpm import DenoiseDiffusion
 from labml_nn.diffusion.ddpm.unet import UNet
 from torch.utils.data import DataLoader
+from early_stopping import EarlyStopping
 
 
 class Configs(BaseConfigs):
@@ -62,8 +63,8 @@ class Configs(BaseConfigs):
 
     # Adam optimizer
     optimizer: torch.optim.Adam
-    # ewc settings
-    ewc_lambda: int = 10000
+    #ewc settings
+    ewc_lambda: int = 10000000000
     mode: str = "separate"
     decay_factor = None
     keep_importance_data = False
@@ -71,8 +72,7 @@ class Configs(BaseConfigs):
     importances: defaultdict
     dataloaders: []
     datasets: []
-
-    # todo: implement multitask
+    early_stopping: EarlyStopping
 
     def init(self):
         # Create $\textcolor{lightgreen}{\epsilon_\theta}(x_t, t)$ model
@@ -92,18 +92,21 @@ class Configs(BaseConfigs):
         self.data_loader()
         # Create optimizer
         self.optimizer = torch.optim.Adam(self.eps_model.parameters(), lr=self.learning_rate)
-
+        self.early_stopping=EarlyStopping()
         # Image logging
         tracker.set_image("sample", True)
+
 
         if self.mode == "separate":
             self.keep_importance_data = True
 
+
         self.saved_params = defaultdict(list)
         self.importances = defaultdict(list)
 
+
     def data_loader(self):
-        dataloaders = []
+        dataloaders=[]
         transform = torchvision.transforms.Compose([
             torchvision.transforms.Resize(self.image_size),
             torchvision.transforms.Grayscale(num_output_channels=1),
@@ -121,7 +124,7 @@ class Configs(BaseConfigs):
         dataset = torchvision.datasets.MNIST('./data/MNIST', train=True, download=True, transform=transform)
         data_loader = torch.utils.data.DataLoader(dataset, self.batch_size, shuffle=True, pin_memory=True)
         dataloaders.append(data_loader)
-        self.dataloaders = dataloaders
+        self.dataloaders=dataloaders
 
     def sample(self):
         """
@@ -148,7 +151,7 @@ class Configs(BaseConfigs):
         """
 
         # Iterate through the dataset
-        # todo: implement multitask
+        train_loss=0
         for data in monit.iterate('Train', self.dataloaders[i]):
             # Increment global step
             tracker.add_global_step()
@@ -159,14 +162,18 @@ class Configs(BaseConfigs):
             self.optimizer.zero_grad()
             # Calculate loss
             loss = self.diffusion.loss(data)
-            penalty = self.penalty(i)
-            loss += self.ewc_lambda * penalty
+            # no penalty for task 0
+            if i>0:
+                penalty= self.penalty(i)
+                loss+=self.ewc_lambda*penalty
             # Compute gradients
             loss.backward()
             # Take an optimization step
             self.optimizer.step()
+            train_loss+=loss.item()
             # Track the loss
             tracker.save('loss', loss)
+        return train_loss
 
     def run(self):
         """
@@ -174,10 +181,10 @@ class Configs(BaseConfigs):
         """
 
         for i in range(len(self.dataloaders)):
-            task_counter = 0
+
             for _ in monit.loop(self.epochs):
                 # Train the model
-                self.train(i)
+                train_loss=self.train(i)
                 # Sample some images
                 self.sample()
                 # New line in the console
@@ -185,7 +192,12 @@ class Configs(BaseConfigs):
                 # Save the model
                 experiment.save_checkpoint()
                 # after_training_exp
-            exp_counter = task_counter
+                # early_stopping
+                self.early_stopping(train_loss)
+                if self.early_stopping.early_stop:
+                    print("Early stopping")
+                    break
+            exp_counter = i
             importances = self.compute_importances(
                 self.eps_model,
                 self.optimizer,
@@ -198,7 +210,7 @@ class Configs(BaseConfigs):
             # clear previous parameter values
             if exp_counter > 0 and (not self.keep_importance_data):
                 del self.saved_params[exp_counter - 1]
-            task_counter += 1
+
 
     def penalty(self, task_counter):
         penalty = torch.tensor(0).float().to(self.device)
@@ -234,7 +246,7 @@ class Configs(BaseConfigs):
         return penalty
 
     def compute_importances(
-            self, model, optimizer, dataloader, device, batch_size
+        self, model, optimizer, dataloader, device, batch_size
     ):
         """
         Compute EWC importance matrix for each parameter
@@ -267,14 +279,14 @@ class Configs(BaseConfigs):
             # get only input, target and task_id from the batch
             # x, y, task_labels = batch[0], batch[1], batch[-1]
             # x, y = x.to(device), y.to(device)
-            batch = batch[0].to(self.device)
+            batch=batch[0].to(self.device)
             optimizer.zero_grad()
             # out = avalanche_forward(model, x, task_labels)
             loss = self.diffusion.loss(batch)
             loss.backward()
 
             for (k1, p), (k2, imp) in zip(
-                    model.named_parameters(), importances
+                model.named_parameters(), importances
             ):
                 assert k1 == k2
                 if p.grad is not None:
@@ -297,9 +309,9 @@ class Configs(BaseConfigs):
             self.importances[t] = importances
         elif self.mode == "online":
             for (k1, old_imp), (k2, curr_imp) in itertools.zip_longest(
-                    self.importances[t - 1],
-                    importances,
-                    fillvalue=(None, None),
+                self.importances[t - 1],
+                importances,
+                fillvalue=(None, None),
             ):
                 # Add new module importances to the importances value (New head)
                 if k1 is None:
@@ -318,6 +330,8 @@ class Configs(BaseConfigs):
 
         else:
             raise ValueError("Wrong EWC mode.")
+
+
 
 
 def main():
