@@ -1,5 +1,6 @@
 import itertools
 import warnings
+from collections.abc import Iterable
 from typing import List
 
 import torch
@@ -62,7 +63,7 @@ class Configs(BaseConfigs):
     # data_loader: torch.utils.data.DataLoader
 
     # Adam optimizer
-    optimizer: torch.optim.Adam
+    _optimizer: torch.optim.Adam
     #ewc settings
     ewc_lambda: int = 10000000000
     mode: str = "separate"
@@ -91,7 +92,7 @@ class Configs(BaseConfigs):
         )
         self.data_loader()
         # Create optimizer
-        self.optimizer = torch.optim.Adam(self.eps_model.parameters(), lr=self.learning_rate)
+        self._optimizer = torch.optim.Adam(self.eps_model.parameters(), lr=self.learning_rate)
         self.early_stopping=EarlyStopping()
         # Image logging
         tracker.set_image("sample", True)
@@ -159,17 +160,18 @@ class Configs(BaseConfigs):
             data = data[0].to(self.device)
 
             # Make the gradients zero
-            self.optimizer.zero_grad()
+            self._optimizer.zero_grad()
             # Calculate loss
             loss = self.diffusion.loss(data)
             # no penalty for task 0
             if i>0:
                 penalty= self.penalty(i)
                 loss+=self.ewc_lambda*penalty
+
             # Compute gradients
             loss.backward()
             # Take an optimization step
-            self.optimizer.step()
+            self._optimizer.step()
             train_loss+=loss.item()
             # Track the loss
             tracker.save('loss', loss)
@@ -182,6 +184,12 @@ class Configs(BaseConfigs):
 
         for i in range(len(self.dataloaders)):
             self.early_stopping.early_stop=False
+            print("task ",i)
+            if i>0:
+                # freeze model
+                set_freeze_by_names(self.eps_model, ('image_proj', 'time_emb', 'down', 'middle', 'up'))
+                self._optimizer = torch.optim.Adam(filter(lambda p: p.requires_grad, self.eps_model.parameters()),
+                                                   lr=self.learning_rate)
             for _ in monit.loop(self.epochs):
                 # Train the model
                 train_loss=self.train(i)
@@ -199,11 +207,7 @@ class Configs(BaseConfigs):
                     break
             exp_counter = i
             importances = self.compute_importances(
-                self.eps_model,
-                self.optimizer,
-                self.dataloaders[i],
-                self.device,
-                self.batch_size,
+                exp_counter
             )
             self.update_importances(importances, exp_counter)
             self.saved_params[exp_counter] = copy_params_dict(self.eps_model)
@@ -246,17 +250,17 @@ class Configs(BaseConfigs):
         return penalty
 
     def compute_importances(
-        self, model, optimizer, dataloader, device, batch_size
+        self, task_counter
     ):
         """
         Compute EWC importance matrix for each parameter
         """
 
-        model.eval()
+        self.eps_model.eval()
 
         # Set RNN-like modules on GPU to training mode to avoid CUDA error
-        if device == "cuda":
-            for module in model.modules():
+        if self.device == "cuda":
+            for module in self.eps_model.modules():
                 if isinstance(module, torch.nn.RNNBase):
                     warnings.warn(
                         "RNN-like modules do not support "
@@ -268,25 +272,25 @@ class Configs(BaseConfigs):
                     module.train()
 
         # list of list
-        importances = zerolike_params_dict(model)
+        importances = zerolike_params_dict(self.eps_model)
         # collate_fn = (
         #     dataset.collate_fn if hasattr(dataset, "collate_fn") else None
         # )
         # dataloader = DataLoader(
         #     dataset, batch_size=batch_size, collate_fn=collate_fn
         # )
-        for i, batch in enumerate(dataloader):
+        for i, batch in enumerate(self.dataloaders[task_counter]):
             # get only input, target and task_id from the batch
             # x, y, task_labels = batch[0], batch[1], batch[-1]
             # x, y = x.to(device), y.to(device)
             batch=batch[0].to(self.device)
-            optimizer.zero_grad()
+            self._optimizer.zero_grad()
             # out = avalanche_forward(model, x, task_labels)
             loss = self.diffusion.loss(batch)
             loss.backward()
 
             for (k1, p), (k2, imp) in zip(
-                model.named_parameters(), importances
+                self.eps_model.named_parameters(), importances
             ):
                 assert k1 == k2
                 if p.grad is not None:
@@ -294,7 +298,7 @@ class Configs(BaseConfigs):
 
         # average over mini batch length
         for _, imp in importances:
-            imp /= float(len(dataloader))
+            imp /= float(len(self.dataloaders[task_counter]))
 
         return importances
 
@@ -331,6 +335,14 @@ class Configs(BaseConfigs):
         else:
             raise ValueError("Wrong EWC mode.")
 
+def set_freeze_by_names(model, layer_names, freeze=True):
+    if not isinstance(layer_names, Iterable):
+        layer_names = [layer_names]
+    for name, child in model.named_children():
+        if name not in layer_names:
+            continue
+        for param in child.parameters():
+            param.requires_grad = not freeze
 
 
 
@@ -345,7 +357,7 @@ def main():
     experiment.configs(configs, {
         # 'dataset': 'MNIST',  # 'MNIST'，CelebA
         'image_channels': 1,  # 1,3
-        'epochs': 50,  # 5,100
+        'epochs': 40,  # 5,100
     })
 
     # Initialize
