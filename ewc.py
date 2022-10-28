@@ -181,7 +181,7 @@ class Configs(BaseConfigs):
         """
 
         for i in range(len(self.dataloaders)):
-
+            self.early_stopping.early_stop=False
             for _ in monit.loop(self.epochs):
                 # Train the model
                 train_loss=self.train(i)
