@@ -204,6 +204,30 @@ def mnist_dataset(c: Configs):
     """
     return MNISTDataset(c.image_size)
 
+class SVHNDataset(torchvision.datasets.SVHN):
+    """
+    ### MNIST dataset
+    """
+
+    def __init__(self, image_size):
+        transform = torchvision.transforms.Compose([
+            torchvision.transforms.Resize(image_size),
+            torchvision.transforms.ToTensor(),
+        ])
+
+        super().__init__(str(lab.get_data_path()), train=True, download=True, transform=transform)
+
+    def __getitem__(self, item):
+        return super().__getitem__(item)[0]
+
+
+@option(Configs.dataset, 'SVHN')
+def mnist_dataset(c: Configs):
+    """
+    Create MNIST dataset
+    """
+    return SVHNDataset(c.image_size)
+
 
 def main():
     # Create experiment
@@ -214,9 +238,9 @@ def main():
 
     # Set configurations. You can override the defaults by passing the values in the dictionary.
     experiment.configs(configs, {
-        'dataset': 'MNIST',  # 'MNIST'，CelebADataset
-        'image_channels': 1,  # 1,3
-        'epochs': 5,  # 5,100
+        'dataset': 'SVHN',  # 'MNIST'，CelebADataset
+        'image_channels': 3,  # 1,3
+        'epochs': 100,  # 5,100
     })
 
     # Initialize
